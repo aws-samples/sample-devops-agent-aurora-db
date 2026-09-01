@@ -141,14 +141,9 @@ flowchart LR
 
 ### 1. Clone the repository
 
-Clone the repository from wherever you obtained it, then change into it. Once
-this sample is published through the approved process it will live under the
-`aws-samples` org with a `sample-` prefixed name; update the URL below to the
-canonical location at that point.
-
 ```bash
-git clone <repository-url>
-cd <repository-directory>
+git clone https://github.com/aws-samples/sample-devops-agent-aurora-db.git
+cd sample-devops-agent-aurora-db
 ```
 
 ### 2. Deploy the Aurora PostgreSQL cluster
