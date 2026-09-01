@@ -50,20 +50,27 @@ Resources:
                 aws:SourceArn: !Sub 'arn:aws:aidevops:${AWS::Region}:${AWS::AccountId}:agentspace/*'
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AIDevOpsAgentAccessPolicy
-      Policies:
-        - PolicyName: AllowCreateServiceLinkedRoles
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Sid: AllowCreateServiceLinkedRoles
-                Effect: Allow
-                Action:
-                  - iam:CreateServiceLinkedRole
-                Resource:
-                  - !Sub 'arn:aws:iam::${AWS::AccountId}:role/aws-service-role/resource-explorer-2.amazonaws.com/AWSServiceRoleForResourceExplorer'
       Tags:
         - Key: Project
           Value: aurora-devops-agent
+
+  # Permissions for the agent space role, as a standalone managed policy rather
+  # than an inline role policy (inline policies are disallowed by policy).
+  DevOpsAgentSpacePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub 'DevOpsAgentPolicy-${AgentSpaceName}'
+      Roles:
+        - !Ref DevOpsAgentSpaceRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCreateServiceLinkedRoles
+            Effect: Allow
+            Action:
+              - iam:CreateServiceLinkedRole
+            Resource:
+              - !Sub 'arn:aws:iam::${AWS::AccountId}:role/aws-service-role/resource-explorer-2.amazonaws.com/AWSServiceRoleForResourceExplorer'
 
   DevOpsOperatorRole:
     Type: AWS::IAM::Role

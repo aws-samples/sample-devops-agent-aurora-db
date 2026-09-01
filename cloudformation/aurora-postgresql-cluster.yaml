@@ -216,6 +216,13 @@ Resources:
         - Key: Environment
           Value: development
 
+  # NOTE: This is an Aurora cluster-member instance (it has DBClusterIdentifier).
+  # For Aurora, the master credentials are a CLUSTER-level property and are set on
+  # AuroraDBCluster above via {{resolve:secretsmanager:...}}. MasterUserPassword
+  # must NOT be set on a cluster-member DBInstance — doing so is rejected by
+  # CloudFormation. A scanner rule (RDS_MASTER_USER_PASSWORD_USES_SECURE_PARAMETER)
+  # that expects MasterUserPassword on the instance is a false positive here; the
+  # secure-parameter requirement is satisfied on the cluster.
   AuroraDBInstance1:
     Type: AWS::RDS::DBInstance
     Properties:
@@ -232,6 +239,14 @@ Resources:
         - Key: Name
           Value: !Sub ${ClusterIdentifier}-instance-1
 
+  # NOTE: The MultiAZ property is NOT valid for the aurora engine — CloudFormation
+  # rejects it ("Multi-AZ DB Instances are not available for engine: aurora").
+  # Aurora provides multi-AZ availability at the CLUSTER level (storage is
+  # replicated across AZs, and reader instances are placed in different AZs),
+  # not via this per-instance flag. A scanner rule (RDS_MULTI_AZ_SUPPORT) that
+  # expects MultiAZ on an Aurora cluster-member instance is a false positive; for
+  # real HA here, run 2+ instances across AZs (NumberOfInstances) or use
+  # Serverless v2 with the cluster spanning multiple subnets/AZs.
   AuroraDBInstance2:
     Type: AWS::RDS::DBInstance
     Condition: UseProvisionedInstances

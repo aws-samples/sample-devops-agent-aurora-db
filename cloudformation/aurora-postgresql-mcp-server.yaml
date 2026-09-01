@@ -87,6 +87,30 @@ Parameters:
       the MCP server. 0 disables the timeout. Guards against expensive/runaway
       queries via the public endpoint.
 
+  McpFunctionReservedConcurrency:
+    Type: Number
+    Default: 10
+    MinValue: 0
+    Description: >-
+      Reserved concurrent executions for the MCP handler Lambda. Caps how many
+      invocations can run at once, bounding load on the database and downstream
+      cost/abuse from the public endpoint. Set to 0 to disable the function.
+
+  AuthorizerReservedConcurrency:
+    Type: Number
+    Default: 10
+    MinValue: 0
+    Description: >-
+      Reserved concurrent executions for the API Gateway authorizer Lambda.
+
+  RotationReservedConcurrency:
+    Type: Number
+    Default: 2
+    MinValue: 0
+    Description: >-
+      Reserved concurrent executions for the API key rotation Lambda (invoked
+      rarely, so a small reservation is sufficient).
+
   EnableApiKeyRotation:
     Type: String
     Default: 'true'
@@ -205,58 +229,65 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-      Policies:
-        - PolicyName: PostgresMcpPolicy
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Sid: RDSDataAPI
-                Effect: Allow
-                Action:
-                  - rds-data:ExecuteStatement
-                  - rds-data:BatchExecuteStatement
-                  - rds-data:BeginTransaction
-                  - rds-data:CommitTransaction
-                  - rds-data:RollbackTransaction
-                # Scoped to the single Aurora cluster this MCP server serves.
-                Resource: !Sub 'arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster:${ClusterIdentifier}'
-              - Sid: RDSDescribe
-                Effect: Allow
-                Action:
-                  - rds:DescribeDBClusters
-                  - rds:DescribeDBInstances
-                  - rds:DescribeDBClusterEndpoints
-                # These are List/Read actions that AWS does NOT support with
-                # resource-level ARNs — IAM requires Resource: '*' for them (see
-                # "Actions, resources, and condition keys for Amazon RDS"). This
-                # only allows *reading metadata* (identifier, status, endpoint).
-                # It does NOT widen data access: rds-data above is scoped to the
-                # single cluster ARN, and do_run_query() authenticates with the
-                # least-privilege app secret, so SQL cannot be run against any
-                # other cluster regardless of what Describe can enumerate.
-                Resource: '*'
-              - Sid: SecretsManager
-                Effect: Allow
-                Action:
-                  - secretsmanager:GetSecretValue
-                  - secretsmanager:DescribeSecret
-                # Scoped to only the least-privilege app credentials this function
-                # uses. The master DB secret is intentionally NOT granted here.
-                Resource:
-                  - !Ref AppDbCredentialsSecret
-              - Sid: KmsDecryptSecrets
-                Effect: Allow
-                Action:
-                  - kms:Decrypt
-                  - kms:DescribeKey
-                # Scoped to the specific CMK protecting these secrets.
-                Resource: !If
-                  - CreateSecretsKmsKey
-                  - !GetAtt SecretsKmsKey.Arn
-                  - !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/${SecretsKmsKeyId}'
       Tags:
         - Key: Project
           Value: postgres-mcp-server
+
+  # Permissions for the MCP Lambda role, as a standalone managed policy rather
+  # than an inline role policy (inline policies are disallowed by policy).
+  McpLambdaPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${Environment}-postgres-mcp-lambda-policy'
+      Roles:
+        - !Ref McpLambdaRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: RDSDataAPI
+            Effect: Allow
+            Action:
+              - rds-data:ExecuteStatement
+              - rds-data:BatchExecuteStatement
+              - rds-data:BeginTransaction
+              - rds-data:CommitTransaction
+              - rds-data:RollbackTransaction
+            # Scoped to the single Aurora cluster this MCP server serves.
+            Resource: !Sub 'arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster:${ClusterIdentifier}'
+          - Sid: RDSDescribe
+            Effect: Allow
+            Action:
+              - rds:DescribeDBClusters
+              - rds:DescribeDBInstances
+              - rds:DescribeDBClusterEndpoints
+            # These are List/Read actions that AWS does NOT support with
+            # resource-level ARNs — IAM requires Resource: '*' for them (see
+            # "Actions, resources, and condition keys for Amazon RDS"). This
+            # only allows *reading metadata* (identifier, status, endpoint).
+            # It does NOT widen data access: rds-data above is scoped to the
+            # single cluster ARN, and do_run_query() authenticates with the
+            # least-privilege app secret, so SQL cannot be run against any
+            # other cluster regardless of what Describe can enumerate.
+            Resource: '*'
+          - Sid: SecretsManager
+            Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+              - secretsmanager:DescribeSecret
+            # Scoped to only the least-privilege app credentials this function
+            # uses. The master DB secret is intentionally NOT granted here.
+            Resource:
+              - !Ref AppDbCredentialsSecret
+          - Sid: KmsDecryptSecrets
+            Effect: Allow
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+            # Scoped to the specific CMK protecting these secrets.
+            Resource: !If
+              - CreateSecretsKmsKey
+              - !GetAtt SecretsKmsKey.Arn
+              - !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/${SecretsKmsKeyId}'
 
   AuthorizerRole:
     Type: AWS::IAM::Role
@@ -271,28 +302,35 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-      Policies:
-        - PolicyName: ReadApiKeySecret
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
-                  - secretsmanager:GetSecretValue
-                Resource: !Ref McpApiKeySecret
-              - Sid: KmsDecryptApiKey
-                Effect: Allow
-                Action:
-                  - kms:Decrypt
-                  - kms:DescribeKey
-                # Scoped to the specific CMK protecting these secrets.
-                Resource: !If
-                  - CreateSecretsKmsKey
-                  - !GetAtt SecretsKmsKey.Arn
-                  - !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/${SecretsKmsKeyId}'
       Tags:
         - Key: Project
           Value: postgres-mcp-server
+
+  # Permissions for the authorizer role, as a standalone managed policy.
+  AuthorizerPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${Environment}-postgres-mcp-authorizer-policy'
+      Roles:
+        - !Ref AuthorizerRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ReadApiKeySecret
+            Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+            Resource: !Ref McpApiKeySecret
+          - Sid: KmsDecryptApiKey
+            Effect: Allow
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+            # Scoped to the specific CMK protecting these secrets.
+            Resource: !If
+              - CreateSecretsKmsKey
+              - !GetAtt SecretsKmsKey.Arn
+              - !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/${SecretsKmsKeyId}'
 
   McpLambdaFunction:
     Type: AWS::Lambda::Function
@@ -303,6 +341,9 @@ Resources:
       Role: !GetAtt McpLambdaRole.Arn
       Timeout: 300
       MemorySize: 1024
+      # Cap concurrent executions to bound database load and abuse via the
+      # public endpoint (LAMBDA_CONCURRENCY_CHECK).
+      ReservedConcurrentExecutions: !Ref McpFunctionReservedConcurrency
       Architectures:
         - arm64
       Environment:
@@ -521,6 +562,8 @@ Resources:
       Role: !GetAtt AuthorizerRole.Arn
       Timeout: 10
       MemorySize: 128
+      # Bound concurrent executions (LAMBDA_CONCURRENCY_CHECK).
+      ReservedConcurrentExecutions: !Ref AuthorizerReservedConcurrency
       Architectures:
         - arm64
       Environment:
@@ -605,35 +648,42 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-      Policies:
-        - PolicyName: RotateApiKeySecret
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Sid: SecretsManagerRotation
-                Effect: Allow
-                Action:
-                  - secretsmanager:GetSecretValue
-                  - secretsmanager:PutSecretValue
-                  - secretsmanager:DescribeSecret
-                  - secretsmanager:UpdateSecretVersionStage
-                  - secretsmanager:GetRandomPassword
-                # Scoped to only the API key secret.
-                Resource: !Ref McpApiKeySecret
-              - Sid: KmsForRotation
-                Effect: Allow
-                Action:
-                  - kms:Decrypt
-                  - kms:Encrypt
-                  - kms:GenerateDataKey
-                  - kms:DescribeKey
-                Resource: !If
-                  - CreateSecretsKmsKey
-                  - !GetAtt SecretsKmsKey.Arn
-                  - !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/${SecretsKmsKeyId}'
       Tags:
         - Key: Project
           Value: postgres-mcp-server
+
+  # Permissions for the rotation role, as a standalone managed policy.
+  RotationLambdaPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: RotateApiKey
+    Properties:
+      ManagedPolicyName: !Sub '${Environment}-postgres-mcp-rotation-policy'
+      Roles:
+        - !Ref RotationLambdaRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: SecretsManagerRotation
+            Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+              - secretsmanager:PutSecretValue
+              - secretsmanager:DescribeSecret
+              - secretsmanager:UpdateSecretVersionStage
+              - secretsmanager:GetRandomPassword
+            # Scoped to only the API key secret.
+            Resource: !Ref McpApiKeySecret
+          - Sid: KmsForRotation
+            Effect: Allow
+            Action:
+              - kms:Decrypt
+              - kms:Encrypt
+              - kms:GenerateDataKey
+              - kms:DescribeKey
+            Resource: !If
+              - CreateSecretsKmsKey
+              - !GetAtt SecretsKmsKey.Arn
+              - !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/${SecretsKmsKeyId}'
 
   ApiKeyRotationFunction:
     Type: AWS::Lambda::Function
@@ -645,6 +695,8 @@ Resources:
       Role: !GetAtt RotationLambdaRole.Arn
       Timeout: 30
       MemorySize: 128
+      # Bound concurrent executions (LAMBDA_CONCURRENCY_CHECK).
+      ReservedConcurrentExecutions: !Ref RotationReservedConcurrency
       Architectures:
         - arm64
       Code:
