@@ -1,0 +1,303 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Creates an Aurora PostgreSQL cluster with serverless v2 or provisioned instances in existing VPC
+
+Parameters:
+  ClusterIdentifier:
+    Type: String
+    Default: aurora-postgres-cluster-1
+    Description: Unique identifier for the Aurora cluster
+
+  DatabaseName:
+    Type: String
+    Default: postgres
+    Description: Name of the initial database
+
+  MasterUsername:
+    Type: String
+    Default: postgres
+    Description: Master username for the cluster
+
+  Environment:
+    Type: String
+    Default: demo
+    Description: >-
+      Naming prefix for the generated master-credentials secret. Must match the
+      Environment used for the MCP server stack so the two stacks agree on the
+      secret name.
+
+  EngineVersion:
+    Type: String
+    Default: '16.14'
+    AllowedValues:
+      - '18.4'
+      - '17.10'
+      - '16.14'
+      - '15.18'
+      - '14.23'
+    Description: >-
+      Aurora PostgreSQL engine version. Minor versions are deprecated over time;
+      run 'aws rds describe-db-engine-versions --engine aurora-postgresql
+      --region <region>' to confirm availability, and pass a current version via
+      the EngineVersion parameter if these defaults are no longer offered.
+
+  ServerlessV2:
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Use Aurora Serverless v2 (true) or provisioned instances (false)
+
+  ServerlessMinCapacity:
+    Type: Number
+    Default: 0.5
+    MinValue: 0.5
+    MaxValue: 128
+    Description: Minimum ACUs for Serverless v2 (0.5 to 128)
+
+  ServerlessMaxCapacity:
+    Type: Number
+    Default: 2
+    MinValue: 0.5
+    MaxValue: 128
+    Description: Maximum ACUs for Serverless v2 (0.5 to 128)
+
+  InstanceClass:
+    Type: String
+    Default: db.r6g.large
+    AllowedValues:
+      - db.t4g.medium
+      - db.t4g.large
+      - db.r6g.large
+      - db.r6g.xlarge
+      - db.r6g.2xlarge
+      - db.r6g.4xlarge
+    Description: Instance class for provisioned instances (ignored if ServerlessV2 is true)
+
+  NumberOfInstances:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 15
+    Description: Number of instances (ignored if ServerlessV2 is true)
+
+  PubliclyAccessible:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: >-
+      Whether the cluster is publicly accessible. Keep this 'false'. WARNING:
+      Setting this to 'true' assigns a public endpoint and, combined with a
+      permissive security group, exposes the database to the internet, which
+      violates AWS security best practices. Only enable in non-production
+      environments and only with strict IP allowlisting via AllowedCidr. For
+      administrative access, prefer a bastion host, AWS Systems Manager Session
+      Manager, or a VPN/Direct Connect connection instead of public access.
+
+  EnableDataApi:
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Enable RDS Data API for serverless query execution
+
+  EnableIAMAuth:
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Enable IAM database authentication
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID where the Aurora cluster will be deployed
+
+  SubnetId1:
+    Type: AWS::EC2::Subnet::Id
+    Description: First subnet ID (must be in different AZ from SubnetId2)
+
+  SubnetId2:
+    Type: AWS::EC2::Subnet::Id
+    Description: Second subnet ID (must be in different AZ from SubnetId1)
+
+  AllowedCidr:
+    Type: String
+    Default: 10.0.0.0/8
+    Description: >-
+      CIDR block allowed to access Aurora on port 5432. Defaults to the private
+      RFC 1918 range 10.0.0.0/8 to avoid public exposure. WARNING: Do NOT use
+      0.0.0.0/0 in production, as it exposes the database to the entire internet.
+      For production deployments, restrict this to specific VPN CIDR blocks,
+      corporate network ranges, or (preferably) reference an application security
+      group instead of a CIDR. For serverless/private access, prefer VPC endpoints
+      or AWS PrivateLink. See AWS RDS network isolation best practices:
+      https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.RDSSecurityGroups.html
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+
+Conditions:
+  UseServerlessV2: !Equals [!Ref ServerlessV2, 'true']
+  UseProvisionedInstances: !Equals [!Ref ServerlessV2, 'false']
+
+Resources:
+  # Master credentials are generated and stored in Secrets Manager rather than
+  # passed in as a plaintext CloudFormation/CLI parameter. The DB cluster reads
+  # the password via a dynamic {{resolve:secretsmanager:...}} reference, so the
+  # secret value never appears in template parameters, CLI args, or stack events.
+  MasterDBCredentialsSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '/${Environment}/postgres-mcp-server/db-credentials'
+      Description: Aurora PostgreSQL master credentials (generated)
+      GenerateSecretString:
+        SecretStringTemplate: !Sub '{"username":"${MasterUsername}"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        # Exclude characters Aurora disallows in the master password (/, @, ", space)
+        # plus a few shell/URL-hostile ones.
+        ExcludeCharacters: "\"@/\\ '"
+      Tags:
+        - Key: Project
+          Value: postgres-mcp-server
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group for Aurora PostgreSQL cluster
+      SubnetIds:
+        - !Ref SubnetId1
+        - !Ref SubnetId2
+      Tags:
+        - Key: Name
+          Value: !Sub ${ClusterIdentifier}-subnet-group
+
+  AuroraSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Aurora PostgreSQL cluster
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: !Ref AllowedCidr
+      Tags:
+        - Key: Name
+          Value: !Sub ${ClusterIdentifier}-sg
+
+  AuroraDBCluster:
+    Type: AWS::RDS::DBCluster
+    Properties:
+      DBClusterIdentifier: !Ref ClusterIdentifier
+      Engine: aurora-postgresql
+      EngineVersion: !Ref EngineVersion
+      DatabaseName: !Ref DatabaseName
+      MasterUsername: !Ref MasterUsername
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:${MasterDBCredentialsSecret}:SecretString:password}}'
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VpcSecurityGroupIds:
+        - !Ref AuroraSecurityGroup
+      StorageEncrypted: true
+      BackupRetentionPeriod: 7
+      PreferredBackupWindow: 03:00-04:00
+      PreferredMaintenanceWindow: mon:04:00-mon:05:00
+      EnableHttpEndpoint: !Ref EnableDataApi
+      EnableIAMDatabaseAuthentication: !Ref EnableIAMAuth
+      ServerlessV2ScalingConfiguration:
+        !If
+          - UseServerlessV2
+          - MinCapacity: !Ref ServerlessMinCapacity
+            MaxCapacity: !Ref ServerlessMaxCapacity
+          - !Ref AWS::NoValue
+      Tags:
+        - Key: Environment
+          Value: development
+
+  AuroraDBInstance1:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub ${ClusterIdentifier}-instance-1
+      DBClusterIdentifier: !Ref AuroraDBCluster
+      Engine: aurora-postgresql
+      DBInstanceClass:
+        !If
+          - UseServerlessV2
+          - db.serverless
+          - !Ref InstanceClass
+      PubliclyAccessible: !Ref PubliclyAccessible
+      Tags:
+        - Key: Name
+          Value: !Sub ${ClusterIdentifier}-instance-1
+
+  AuroraDBInstance2:
+    Type: AWS::RDS::DBInstance
+    Condition: UseProvisionedInstances
+    Properties:
+      DBInstanceIdentifier: !Sub ${ClusterIdentifier}-instance-2
+      DBClusterIdentifier: !Ref AuroraDBCluster
+      Engine: aurora-postgresql
+      DBInstanceClass: !Ref InstanceClass
+      PubliclyAccessible: !Ref PubliclyAccessible
+      Tags:
+        - Key: Name
+          Value: !Sub ${ClusterIdentifier}-instance-2
+
+Outputs:
+  MasterDBCredentialsSecretArn:
+    Description: Secret ARN holding the generated Aurora master credentials
+    Value: !Ref MasterDBCredentialsSecret
+    Export:
+      Name: !Sub ${AWS::StackName}-MasterDBCredentialsSecretArn
+
+  ClusterEndpoint:
+    Description: Aurora cluster writer endpoint
+    Value: !GetAtt AuroraDBCluster.Endpoint.Address
+    Export:
+      Name: !Sub ${AWS::StackName}-ClusterEndpoint
+
+  ClusterPort:
+    Description: Aurora cluster port
+    Value: !GetAtt AuroraDBCluster.Endpoint.Port
+    Export:
+      Name: !Sub ${AWS::StackName}-ClusterPort
+
+  ReaderEndpoint:
+    Description: Aurora cluster reader endpoint
+    Value: !GetAtt AuroraDBCluster.ReadEndpoint.Address
+    Export:
+      Name: !Sub ${AWS::StackName}-ReaderEndpoint
+
+  ClusterIdentifier:
+    Description: Aurora cluster identifier
+    Value: !Ref AuroraDBCluster
+    Export:
+      Name: !Sub ${AWS::StackName}-ClusterIdentifier
+
+  ClusterResourceId:
+    Description: Aurora cluster resource ID (for RDS Data API)
+    Value: !GetAtt AuroraDBCluster.DBClusterResourceId
+    Export:
+      Name: !Sub ${AWS::StackName}-ClusterResourceId
+
+  DatabaseName:
+    Description: Database name
+    Value: !Ref DatabaseName
+    Export:
+      Name: !Sub ${AWS::StackName}-DatabaseName
+
+  SecurityGroupId:
+    Description: Security group ID for the cluster
+    Value: !Ref AuroraSecurityGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-SecurityGroupId
+
+  DataApiEnabled:
+    Description: Whether RDS Data API is enabled
+    Value: !Ref EnableDataApi
+
+  IAMAuthEnabled:
+    Description: Whether IAM database authentication is enabled
+    Value: !Ref EnableIAMAuth

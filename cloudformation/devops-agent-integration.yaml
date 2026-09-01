@@ -1,0 +1,175 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Integrates the Aurora PostgreSQL MCP server with AWS DevOps Agent.
+  Creates an Agent Space, IAM roles, operator app, AWS account association,
+  and MCP server registration + association.
+
+Parameters:
+  AgentSpaceName:
+    Type: String
+    Default: Aurora-PostgreSQL-AgentSpace
+    Description: Name for the DevOps Agent space
+
+  AgentSpaceDescription:
+    Type: String
+    Default: Agent space for Aurora PostgreSQL monitoring via MCP server
+    Description: Description for the agent space
+
+  McpEndpointUrl:
+    Type: String
+    Description: The MCP server endpoint URL (from the MCP server stack output McpEndpointUrl)
+
+  McpApiKeySecretArn:
+    Type: String
+    Description: >-
+      ARN (or name) of the Secrets Manager secret that holds the MCP API key
+      (the MCP server stack's ApiKeySecretArn output). The key value is resolved
+      dynamically at deploy time and is never passed as a plaintext parameter.
+
+  McpApiKeySecretJsonKey:
+    Type: String
+    Default: api_key
+    Description: The JSON field within the secret that holds the API key value.
+
+Resources:
+  DevOpsAgentSpaceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'DevOpsAgentRole-${AgentSpaceName}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: aidevops.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub 'arn:aws:aidevops:${AWS::Region}:${AWS::AccountId}:agentspace/*'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AIDevOpsAgentAccessPolicy
+      Policies:
+        - PolicyName: AllowCreateServiceLinkedRoles
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AllowCreateServiceLinkedRoles
+                Effect: Allow
+                Action:
+                  - iam:CreateServiceLinkedRole
+                Resource:
+                  - !Sub 'arn:aws:iam::${AWS::AccountId}:role/aws-service-role/resource-explorer-2.amazonaws.com/AWSServiceRoleForResourceExplorer'
+      Tags:
+        - Key: Project
+          Value: aurora-devops-agent
+
+  DevOpsOperatorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'DevOpsAgentRole-Operator-${AgentSpaceName}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: aidevops.amazonaws.com
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub 'arn:aws:aidevops:${AWS::Region}:${AWS::AccountId}:agentspace/*'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AIDevOpsOperatorAppAccessPolicy
+      Tags:
+        - Key: Project
+          Value: aurora-devops-agent
+
+  AgentSpace:
+    Type: AWS::DevOpsAgent::AgentSpace
+    DependsOn:
+      - DevOpsAgentSpaceRole
+      - DevOpsOperatorRole
+    Properties:
+      Name: !Ref AgentSpaceName
+      Description: !Ref AgentSpaceDescription
+      OperatorApp:
+        Iam:
+          OperatorAppRoleArn: !GetAtt DevOpsOperatorRole.Arn
+
+  MonitorAssociation:
+    Type: AWS::DevOpsAgent::Association
+    Properties:
+      AgentSpaceId: !GetAtt AgentSpace.AgentSpaceId
+      ServiceId: aws
+      Configuration:
+        Aws:
+          AssumableRoleArn: !GetAtt DevOpsAgentSpaceRole.Arn
+          AccountId: !Ref AWS::AccountId
+          AccountType: monitor
+
+  AuroraMcpService:
+    Type: AWS::DevOpsAgent::Service
+    Properties:
+      ServiceType: mcpserver
+      ServiceDetails:
+        MCPServer:
+          Name: aurora-postgres-mcp-server
+          Endpoint: !Ref McpEndpointUrl
+          Description: Aurora PostgreSQL MCP server for SQL query access via RDS Data API
+          AuthorizationConfig:
+            ApiKey:
+              ApiKeyName: Aurora-Postgres-MCP-Key
+              # Resolved from Secrets Manager at deploy time; never a plaintext param.
+              ApiKeyValue: !Sub '{{resolve:secretsmanager:${McpApiKeySecretArn}:SecretString:${McpApiKeySecretJsonKey}}}'
+              ApiKeyHeader: Authorization
+      Tags:
+        - Key: Project
+          Value: aurora-devops-agent
+
+  McpAssociation:
+    Type: AWS::DevOpsAgent::Association
+    DependsOn:
+      - AgentSpace
+      - AuroraMcpService
+    Properties:
+      AgentSpaceId: !GetAtt AgentSpace.AgentSpaceId
+      ServiceId: !Ref AuroraMcpService
+      Configuration:
+        MCPServer:
+          Tools:
+            - list_clusters
+            - list_databases
+            - list_schemas
+            - list_tables
+            - describe_table
+            - execute_query
+
+Outputs:
+  AgentSpaceId:
+    Description: The DevOps Agent Space ID
+    Value: !GetAtt AgentSpace.AgentSpaceId
+    Export:
+      Name: !Sub '${AWS::StackName}-AgentSpaceId'
+
+  AgentSpaceArn:
+    Description: The DevOps Agent Space ARN
+    Value: !GetAtt AgentSpace.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-AgentSpaceArn'
+
+  AgentSpaceRoleArn:
+    Description: The IAM role ARN assumed by DevOps Agent
+    Value: !GetAtt DevOpsAgentSpaceRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-AgentSpaceRoleArn'
+
+  McpServiceId:
+    Description: The registered MCP service ID
+    Value: !Ref AuroraMcpService
+    Export:
+      Name: !Sub '${AWS::StackName}-McpServiceId'
