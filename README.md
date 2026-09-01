@@ -448,7 +448,7 @@ bash scripts/reset-scenario1.sh
 | `list_databases` | List databases in a cluster | cluster_identifier, database |
 | `list_schemas` | List schemas in a database | cluster_identifier, database |
 | `list_tables` | List tables in a schema | cluster_identifier, database, schema_name |
-| `describe_table` | Show column definitions | cluster_identifier, database, table_name |
+| `describe_table` | Show column definitions | cluster_identifier, database, schema_name, table_name |
 | `execute_query` | Run a SQL query via Data API | cluster_identifier, database, sql |
 
 ## Cost Estimate
@@ -517,7 +517,12 @@ the space uniquely held) for you.
 bash scripts/cleanup.sh
 ```
 
-Deletes all resources in reverse dependency order: DevOps Agent registration, MCP server stack, Aurora cluster stack, and any leftover secrets.
+Deletes the MCP server stack, the Aurora cluster stack, and the three
+generated secrets (master DB credentials, app DB credentials, API key). The
+DevOps Agent integration (Agent Space + MCP service registration) is **not**
+removed by this script — if you deployed `devops-agent-integration.yaml`, delete
+that stack separately, and see the [Troubleshooting](#troubleshooting) section
+for deregistering a stuck MCP service.
 
 ## Contributing
 
@@ -559,6 +564,9 @@ tradeoffs the sample knowingly makes.
   taking a plaintext value.
 - Three secrets are created: master DB credentials, the least-privilege app DB
   credentials, and the API key.
+- All three secrets are encrypted with a **customer-managed KMS CMK** (created by
+  the templates by default, or supplied via `SecretsKmsKeyId`), not the default
+  `aws/secretsmanager` key — giving control over key policy, rotation, and audit.
 
 **Least-privilege database access**
 - The public MCP endpoint authenticates as a dedicated **read-only role**
@@ -573,6 +581,10 @@ tradeoffs the sample knowingly makes.
 **Endpoint protection**
 - The API stage has request throttling (`ApiThrottleRateLimit` /
   `ApiThrottleBurstLimit`) to bound abuse and brute-force attempts.
+- Each Lambda has a **reserved concurrency** cap (`McpFunctionReservedConcurrency`,
+  `AuthorizerReservedConcurrency`, `RotationReservedConcurrency`) so a flood of
+  requests to the public endpoint cannot spin up unbounded executions or overload
+  the database.
 - The API-key authorizer uses a constant-time comparison and accepts a `Bearer`
   scheme.
 - A **WAF WebACL** (per-IP rate limiting plus AWS managed Common and

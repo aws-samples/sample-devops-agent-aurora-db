@@ -24,7 +24,15 @@ echo ""
 echo "3. Cleaning up any orphaned secrets..."
 aws secretsmanager delete-secret --secret-id /demo/postgres-mcp-server/api-key --force-delete-without-recovery 2>/dev/null || true
 aws secretsmanager delete-secret --secret-id /demo/postgres-mcp-server/db-credentials --force-delete-without-recovery 2>/dev/null || true
+aws secretsmanager delete-secret --secret-id /demo/postgres-mcp-server/app-db-credentials --force-delete-without-recovery 2>/dev/null || true
 echo "   ✓ Secrets cleaned up"
+
+echo ""
+echo "NOTE: The DevOps Agent MCP service registration and Agent Space (created by"
+echo "cloudformation/devops-agent-integration.yaml) are NOT removed by this script."
+echo "If you deployed that stack, delete it separately, e.g.:"
+echo "  aws cloudformation delete-stack --stack-name <integration-stack-name>"
+echo "See the README Troubleshooting section for deregistering a stuck MCP service."
 
 echo ""
 echo "=== Cleanup complete ==="
