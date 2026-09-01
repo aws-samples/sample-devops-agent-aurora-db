@@ -138,11 +138,63 @@ Parameters:
       https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.RDSSecurityGroups.html
     AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
 
+  SecretsKmsKeyId:
+    Type: String
+    Default: ''
+    Description: >-
+      Optional KMS key ID/ARN used to encrypt the generated master-credentials
+      secret. Leave empty to have this template create a dedicated customer-managed
+      KMS CMK. Using a CMK (instead of the default aws/secretsmanager key) gives
+      you control over key policies, rotation, and audit, per AWS security best
+      practices.
+
 Conditions:
   UseServerlessV2: !Equals [!Ref ServerlessV2, 'true']
   UseProvisionedInstances: !Equals [!Ref ServerlessV2, 'false']
+  CreateSecretsKmsKey: !Equals [!Ref SecretsKmsKeyId, '']
 
 Resources:
+  # Customer-managed CMK for the generated master-credentials secret. Using a CMK
+  # instead of the default aws/secretsmanager key satisfies CKV_AWS_149 and gives
+  # control over key policy, rotation, and audit. Created only when the caller did
+  # not supply an existing key via SecretsKmsKeyId.
+  SecretsKmsKey:
+    Type: AWS::KMS::Key
+    Condition: CreateSecretsKmsKey
+    Properties:
+      Description: !Sub 'CMK for ${Environment} Aurora master-credentials secret'
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableRootAccountAdmin
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: AllowSecretsManagerUse
+            Effect: Allow
+            Principal:
+              Service: secretsmanager.amazonaws.com
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: '*'
+      Tags:
+        - Key: Project
+          Value: postgres-mcp-server
+
+  SecretsKmsKeyAlias:
+    Type: AWS::KMS::Alias
+    Condition: CreateSecretsKmsKey
+    Properties:
+      AliasName: !Sub 'alias/${Environment}-aurora-master-secret'
+      TargetKeyId: !Ref SecretsKmsKey
+
   # Master credentials are generated and stored in Secrets Manager rather than
   # passed in as a plaintext CloudFormation/CLI parameter. The DB cluster reads
   # the password via a dynamic {{resolve:secretsmanager:...}} reference, so the
@@ -152,6 +204,9 @@ Resources:
     Properties:
       Name: !Sub '/${Environment}/postgres-mcp-server/db-credentials'
       Description: Aurora PostgreSQL master credentials (generated)
+      # Encrypt with a customer-managed CMK (CKV_AWS_149), not the default
+      # aws/secretsmanager key.
+      KmsKeyId: !If [CreateSecretsKmsKey, !Ref SecretsKmsKey, !Ref SecretsKmsKeyId]
       GenerateSecretString:
         SecretStringTemplate: !Sub '{"username":"${MasterUsername}"}'
         GenerateStringKey: password
